@@ -117,10 +117,16 @@ static inline sn_conntrack_t *sn_conntrack_lookup(u32 hash, u32 wh_addr,
         u16 wh_port, u32 fh_addr,
         u16 fh_port)
 {
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,11,0)
     struct hlist_node *n;
+#endif
     sn_conntrack_t *ct;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,11,0)
     hlist_for_each_entry(ct, n, &sn_htable[hash].list, link) {
+#else
+    hlist_for_each_entry(ct, &sn_htable[hash].list, link) {
+#endif
         if (ct->waddr != wh_addr
                 || ct->faddr != fh_addr
                 || ct->wport != wh_port || ct->fport != fh_port)
@@ -930,7 +936,12 @@ get_origin(const char *in, const char *out)
     return SNOOP_UNKNOWN;
 }
 
-static unsigned int snoop_nf_hook(unsigned int hook,
+static unsigned int snoop_nf_hook(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,11,0)
+        const struct nf_hook_ops *ops,
+#else
+        unsigned int hook,
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
         struct sk_buff *pskb,
 #else
@@ -978,6 +989,7 @@ static int snoop_htable_alloc(void)
     unsigned long size;
     int i;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,11,0)
     snoop_hash_rnd = (u32) ((num_physpages ^ (num_physpages >> 7)) ^
             (jiffies ^ (jiffies >> 6)));
 
@@ -986,6 +998,16 @@ static int snoop_htable_alloc(void)
 
     if (num_physpages > (1024 * 1024 * 1024 / PAGE_SIZE))
         snoop_htable_size = 8192;
+#else
+    snoop_hash_rnd = (u32) ((totalram_pages ^ (totalram_pages >> 7)) ^
+            (jiffies ^ (jiffies >> 6)));
+
+    snoop_htable_size = (totalram_pages << PAGE_SHIFT) / 16384;
+    snoop_htable_size /= sizeof(struct list_head);
+
+    if (totalram_pages > (1024 * 1024 * 1024 / PAGE_SIZE))
+        snoop_htable_size = 8192;
+#endif
 
     if (snoop_htable_size < 16)
         snoop_htable_size = 16;
@@ -1096,14 +1118,21 @@ static void snoop_exit(void)
     nf_unregister_hook(&snoop_ops);
 
     for (i = 0; i < snoop_htable_size; i++) {
-        struct hlist_node *pos, *n;
+        struct hlist_node *pos;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,11,0)
+        struct hlist_node *n;
+#endif
         sn_conntrack_t *ct;
 
         if (hlist_empty(&sn_htable[i].list))
             continue;
 
         write_lock(&sn_htable[i].lock);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,11,0)
         hlist_for_each_entry_safe(ct, pos, n, &sn_htable[i].list, link) {
+#else
+        hlist_for_each_entry_safe(ct, pos, &sn_htable[i].list, link) {
+#endif
             if (test_and_set_bit(FL_SNOOP_DESTROYING, &ct->flags))
                 continue;
             sn_conntrack_get(ct);
