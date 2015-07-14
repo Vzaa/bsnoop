@@ -96,6 +96,7 @@ typedef struct sn_conntrack_s {
 	int			pkt_count;	/* qty of cached segments */
 	struct timer_list	rto_timer;	/* retransmission timeout timer */
 	struct timer_list	tmo_timer;	/* connection idle timeout timer */
+    struct sk_buff * first_ack;
 } sn_conntrack_t;
 
 typedef struct {

@@ -144,6 +144,10 @@ static inline void sn_conntrack_add(sn_conntrack_t * ct)
 
 static inline void sn_conntrack_del(sn_conntrack_t * ct)
 {
+    if (ct->first_ack != NULL) {
+        kfree_skb(ct->first_ack);
+        ct->first_ack = NULL;
+    }
     hlist_del(&ct->link);
 }
 
@@ -361,6 +365,9 @@ inline static void restart_idle_timer(sn_conntrack_t * ct)
 
 static unsigned int snoop_data(pkt_info_t * pkt_info)
 {
+    struct sk_buff * rep_ack = NULL;
+    struct iphdr *iph;
+    struct tcphdr *tcph, _tcph;
     unsigned int result = NF_ACCEPT;
     u32 hash =
         snoop_hash(pkt_info->daddr, pkt_info->dport, pkt_info->saddr,
@@ -398,6 +405,11 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             // result = NF_DROP;
             DBG("OLD");
         }
+        rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
+        iph = ipip_hdr(rep_ack);
+        tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
+        tcph->ack_seq = htonl(pkt_info->seq);
+        nf_forward(rep_ack);
     }
 
     DBG_SEQ_ACK(entry);
@@ -471,6 +483,7 @@ static void conntrack_create(pkt_info_t * pkt_info)
     entry->fport = pkt_info->dport;
     entry->rtt = msecs_to_jiffies(SNOOP_DEFAULT_RTT);
     entry->risn = pkt_info->seq;
+    entry->first_ack = NULL;
 
     init_timer(&entry->tmo_timer);
     entry->tmo_timer.function = connection_timeout;
@@ -505,8 +518,7 @@ static void rtt_calc(sn_conntrack_t * ct, unsigned long pkt_send_time)
     DBG(" RTT<%lu/%lu>", ct->rtt, diff);
 }
 
-    static int
-extract_sack_option(pkt_info_t * pkt_info, struct tcp_sack_block *sb)
+static int extract_sack_option(pkt_info_t * pkt_info, struct tcp_sack_block *sb)
 {
     int result = 0;
     unsigned char *ptr;
@@ -625,6 +637,13 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
     if (entry->state == SNOOP_WAITACK) {
         entry->state = SNOOP_ESTABLISHED;
         entry->last_ack = pkt_info->ack_seq;
+        if (entry->first_ack == NULL) {
+            kfree_skb(entry->first_ack);
+        }
+        entry->first_ack = skb_copy(pkt_info->skb, GFP_ATOMIC);
+        if (entry->first_ack == NULL) {
+            printk(KERN_ERR "SNOOP: cannot allocate ack\n");
+        }
         DBG("ESTABLISHED");
     } else if (pkt_info->ack_seq < entry->last_ack) {	// Spurious ACK
         DBG("SPU");
@@ -777,8 +796,7 @@ out:
     return result;
 }
 
-    static void
-conntrack_destroy(enum sn_pkt_origin origin, pkt_info_t * pkt_info)
+static void conntrack_destroy(enum sn_pkt_origin origin, pkt_info_t * pkt_info)
 {
     sn_conntrack_t *entry;
     u32 wh_addr, fh_addr;
@@ -924,8 +942,7 @@ static inline int is_wl_dev(const char *dev)
     return strcmp(wh_dev, dev) == 0;
 }
 
-    static inline enum sn_pkt_origin
-get_origin(const char *in, const char *out)
+static inline enum sn_pkt_origin get_origin(const char *in, const char *out)
 {
     if (is_wl_dev(in) && is_fx_dev(out))
         return SNOOP_FROM_WH;
