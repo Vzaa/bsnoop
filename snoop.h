@@ -54,7 +54,7 @@ typedef struct {
 	u32		seq;
 	u32		ack_seq;
 	u16		window;
-	u16		size;	
+	u16		size;
 	u16		ack:1,
 			rst:1,
 			syn:1,
@@ -98,7 +98,7 @@ typedef struct sn_conntrack_s {
 	struct timer_list	rto_timer;	/* retransmission timeout timer */
 	struct timer_list	tmo_timer;	/* connection idle timeout timer */
     struct sk_buff * first_ack;
-	u32			first_seq;	
+	u32			first_seq;
 } sn_conntrack_t;
 
 typedef struct {
@@ -118,8 +118,8 @@ typedef struct snoop_stats_s {
 	unsigned long dupacks_dropped;		/* total DUP ACKs dropped */
 	unsigned long win_updates;		/* total window updates */
 	unsigned long rto;			/* total retransmit timeouts */
-	unsigned long dropped_acks;		
-	unsigned long ack_resets;		/* total DUP ACKs dropped */
+	unsigned long dropped_acks;
+	unsigned long ack_resets;
 } snoop_stats_t;
 
 #endif // ! __SNOOP_H__

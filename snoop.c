@@ -78,6 +78,11 @@ static snoop_stats_t snoop_stats = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 static int (*nf_forward) (struct sk_buff *);
 
+static inline int get_optlen(struct tcphdr * tcph);
+static inline unsigned char * get_opt_ptr(struct sk_buff * skb, int optlen);
+static inline void get_ts(unsigned char * ptr, u32 * ts_a, u32 * ts_b);
+static inline void set_ts(unsigned char * ptr, u32 ts_a, u32 ts_b);
+
 static void sn_forward(sn_packet_t * pkt)
 {
     struct sk_buff *clone;
@@ -411,30 +416,63 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
                 iph = ip_hdr(rep_ack);
                 tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
-                u16 check = 0;
-                u16 old_check = tcph->check;
                 tcph->check = 0;
-                check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
-                DBG("\n0x%x 0x%x %d 0x%x\n", check, old_check, rep_ack->len, rep_ack->csum);
+                /*u16 check = 0;*/
+                /*u16 old_check = tcph->check;*/
+                /*check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));*/
+                /*DBG("\n0x%x 0x%x %d 0x%x\n", check, old_check, rep_ack->len, rep_ack->csum);*/
 
                 tcph->seq = htonl(pkt_info->ack_seq);
                 tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
                 /*tcph->window = htonl(entry->last_window);*/
-                check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
-                tcph->check = check;
-                DBG("SNOOP: OKAN reply with ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->first_seq + 1);
-                DBG("SNOOP: OKAN reply with seq:%u\n", pkt_info->ack_seq);
+#ifdef TS_UPDATE_TEST
+                /*scan optional parts for timestamp*/
+                u32 ts_a = 0, ts_b = 0;
+                if (pkt_info->opt != NULL) {
+                    for (i = 0; i < pkt_info->optlen; ++i) {
+                        switch (pkt_info->opt[i]) {
+                            case 1:
+                                break;
+                            case 8:
+                                get_ts(pkt_info->opt + i, &ts_a, &ts_b);
+                                DBG("ts 0x%x 0x%x\n", ts_a, ts_b);
+                                i+=pkt_info->opt[i + 1];
+                                break;
+                            default:
+                                printk(KERN_ERR "SNOOP: Unhandled opts field, don't know what to do\n");
+                        }
+                    }
+                }
+                unsigned char * opts = get_opt_ptr(rep_ack, get_optlen(tcph));
+                if (opts != NULL) {
+                    for (i = 0; i < get_optlen(tcph); ++i) {
+                        switch (opts[i]) {
+                            case 1:
+                                break;
+                            case 8:
+                                set_ts(opts + i, ts_b, ts_a);
+                                i+=opts[i + 1];
+                                break;
+                            default:
+                                printk(KERN_ERR "SNOOP: Unhandled opts field, don't know what to do\n");
+                        }
+                    }
+                }
+#endif
+                /* calculate updated checksum */
+                tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
+                DBG("SNOOP: reply with rel ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->first_seq + 1);
                 DBG("ACK INSERT SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
-                        ((unsigned char*)&(iph->saddr))[3],
-                        ((unsigned char*)&(iph->saddr))[2],
-                        ((unsigned char*)&(iph->saddr))[1],
                         ((unsigned char*)&(iph->saddr))[0],
-                        ((unsigned char*)&(iph->daddr))[3],
-                        ((unsigned char*)&(iph->daddr))[2],
-                        ((unsigned char*)&(iph->daddr))[1],
+                        ((unsigned char*)&(iph->saddr))[1],
+                        ((unsigned char*)&(iph->saddr))[2],
+                        ((unsigned char*)&(iph->saddr))[3],
                         ((unsigned char*)&(iph->daddr))[0],
-                        pkt_info->sport,
-                        pkt_info->dport
+                        ((unsigned char*)&(iph->daddr))[1],
+                        ((unsigned char*)&(iph->daddr))[2],
+                        ((unsigned char*)&(iph->daddr))[3],
+                        pkt_info->dport,
+                        pkt_info->sport
                    );
                 nf_forward(rep_ack);
                 /*kfree_skb(rep_ack);*/
@@ -973,6 +1011,39 @@ static void setup_pkt_info(pkt_info_t * result, struct sk_buff *skb)
     result->skb = skb;
 }
 
+static inline int get_optlen(struct tcphdr * tcph)
+{
+    return (tcph->doff << 2) - sizeof(struct tcphdr);
+}
+
+static inline void get_ts(unsigned char * ptr, u32 * ts_a, u32 * ts_b)
+{
+    *ts_a = ntohl(*((u32*) (ptr + 1)));
+    *ts_b = ntohl(*((u32*) (ptr + 5)));
+}
+
+static inline void set_ts(unsigned char * ptr, u32 ts_a, u32 ts_b)
+{
+    *((u32*) (ptr + 1)) = htonl(ts_a);
+    *((u32*) (ptr + 5)) = htonl(ts_b);
+}
+
+static inline unsigned char * get_opt_ptr(struct sk_buff * skb, int optlen)
+{
+    struct iphdr *iph;
+    unsigned char * tmp;
+	u8		_opt[40];
+    iph = ip_hdr(skb);
+    tmp = skb_header_pointer(skb, (iph->ihl << 2) + sizeof(struct tcphdr), optlen, _opt);
+    if (tmp == NULL || tmp == _opt) {
+        return NULL;
+    }
+    else {
+        return tmp;
+    }
+}
+    
+
 static inline int is_fx_dev(const char *dev)
 {
     return strcmp(fh_dev, dev) == 0;
@@ -1153,7 +1224,6 @@ static int snoop_init(void)
     }
 
     printk("Berkley snoop version %s: %s\n", VERSION, AUTHOR);
-    DBG("SUP\n");
 
 #if 0
     printk("Berkley snoop version %s (%u buckets, %d max)"
@@ -1246,7 +1316,7 @@ static void snoop_exit(void)
     printk("SNOOP: Input packets %lu, %lu retransmitted\n",
             snoop_stats.input_pkts, snoop_stats.sender_rxmits);
     printk
-        ("SNOOP: ACKs %lu total, %lu NEW, %lu DUP, %lu WUPD, %lu DROPPED %lu dropped %lu reset\n",
+        ("SNOOP: ACKs %lu total, %lu NEW, %lu DUP, %lu WUPD, %lu DROPPED_DUPACKS %lu DROPPED_ACKS %lu RESETS\n",
          snoop_stats.acks, snoop_stats.newacks, snoop_stats.dupacks,
          snoop_stats.win_updates, snoop_stats.dupacks_dropped, snoop_stats.dropped_acks, snoop_stats.ack_resets);
     printk
