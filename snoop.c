@@ -30,7 +30,7 @@
 #include <asm/unaligned.h>
 #include "snoop.h"
 
-#if 1
+#if 0
 #define DBG(args...)	printk(args)
 #else
 #define DBG(args...)
@@ -74,7 +74,7 @@ static u32 snoop_htable_size;
 static u32 snoop_conn_max;
 static sn_hash_bucket_t *sn_htable;
 
-static snoop_stats_t snoop_stats = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static snoop_stats_t snoop_stats = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 static int (*nf_forward) (struct sk_buff *);
 
@@ -365,6 +365,7 @@ inline static void restart_idle_timer(sn_conntrack_t * ct)
 
 static unsigned int snoop_data(pkt_info_t * pkt_info)
 {
+    int i;
     struct sk_buff * rep_ack = NULL;
     struct iphdr *iph;
     struct tcphdr *tcph, _tcph;
@@ -405,11 +406,40 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             // result = NF_DROP;
             DBG("OLD");
         }
-        rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
-        iph = ipip_hdr(rep_ack);
-        tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
-        tcph->ack_seq = htonl(pkt_info->seq);
-        nf_forward(rep_ack);
+        if (entry->first_ack) {
+            if (pkt_info->size > 0) {
+                rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
+                iph = ip_hdr(rep_ack);
+                tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
+                u16 check = 0;
+                u16 old_check = tcph->check;
+                tcph->check = 0;
+                check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
+                DBG("\n0x%x 0x%x %d 0x%x\n", check, old_check, rep_ack->len, rep_ack->csum);
+
+                tcph->seq = htonl(pkt_info->ack_seq);
+                tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
+                /*tcph->window = htonl(entry->last_window);*/
+                check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
+                tcph->check = check;
+                DBG("SNOOP: OKAN reply with ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->first_seq + 1);
+                DBG("SNOOP: OKAN reply with seq:%u\n", pkt_info->ack_seq);
+                DBG("ACK INSERT SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
+                        ((unsigned char*)&(iph->saddr))[3],
+                        ((unsigned char*)&(iph->saddr))[2],
+                        ((unsigned char*)&(iph->saddr))[1],
+                        ((unsigned char*)&(iph->saddr))[0],
+                        ((unsigned char*)&(iph->daddr))[3],
+                        ((unsigned char*)&(iph->daddr))[2],
+                        ((unsigned char*)&(iph->daddr))[1],
+                        ((unsigned char*)&(iph->daddr))[0],
+                        pkt_info->sport,
+                        pkt_info->dport
+                   );
+                nf_forward(rep_ack);
+                /*kfree_skb(rep_ack);*/
+            }
+        }
     }
 
     DBG_SEQ_ACK(entry);
@@ -428,14 +458,14 @@ static void conntrack_create(pkt_info_t * pkt_info)
                 pkt_info->dport);
     sn_conntrack_t *entry;
     DBG("TRACK TCP, SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
-            ((char*)&(pkt_info->saddr))[3],
-            ((char*)&(pkt_info->saddr))[2],
-            ((char*)&(pkt_info->saddr))[1],
-            ((char*)&(pkt_info->saddr))[0],
-            ((char*)&(pkt_info->daddr))[3],
-            ((char*)&(pkt_info->daddr))[2],
-            ((char*)&(pkt_info->daddr))[1],
-            ((char*)&(pkt_info->daddr))[0],
+            ((unsigned char*)&(pkt_info->saddr))[3],
+            ((unsigned char*)&(pkt_info->saddr))[2],
+            ((unsigned char*)&(pkt_info->saddr))[1],
+            ((unsigned char*)&(pkt_info->saddr))[0],
+            ((unsigned char*)&(pkt_info->daddr))[3],
+            ((unsigned char*)&(pkt_info->daddr))[2],
+            ((unsigned char*)&(pkt_info->daddr))[1],
+            ((unsigned char*)&(pkt_info->daddr))[0],
             pkt_info->sport,
             pkt_info->dport
        );
@@ -609,6 +639,7 @@ static unsigned int snoop_clean_packets(sn_conntrack_t * ct, u32 ack_seq)
 
 static unsigned int snoop_ack(pkt_info_t * pkt_info)
 {
+    int alloc_first_ack = 0;
     u32 hash =
         snoop_hash(pkt_info->saddr, pkt_info->sport, pkt_info->daddr,
                 pkt_info->dport);
@@ -637,13 +668,16 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
     if (entry->state == SNOOP_WAITACK) {
         entry->state = SNOOP_ESTABLISHED;
         entry->last_ack = pkt_info->ack_seq;
-        if (entry->first_ack == NULL) {
+        if (entry->first_ack != NULL) {
             kfree_skb(entry->first_ack);
         }
         entry->first_ack = skb_copy(pkt_info->skb, GFP_ATOMIC);
         if (entry->first_ack == NULL) {
             printk(KERN_ERR "SNOOP: cannot allocate ack\n");
         }
+        entry->first_seq = pkt_info->ack_seq;
+        snoop_stats.ack_resets++;
+        alloc_first_ack = 1;
         DBG("ESTABLISHED");
     } else if (pkt_info->ack_seq < entry->last_ack) {	// Spurious ACK
         DBG("SPU");
@@ -785,6 +819,10 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
         result = NF_DROP;
     }
 out:
+    if (!alloc_first_ack && !pkt_info->psh && pkt_info->size == 0) {
+        result = NF_DROP;
+        snoop_stats.dropped_acks++;
+    }
     entry->last_window = pkt_info->window;
     DBG_SEQ_ACK(entry);
     spin_unlock(&entry->lock);
@@ -858,6 +896,7 @@ static unsigned int process_pkt(enum sn_pkt_origin origin, pkt_info_t * pkt_info
 {
     unsigned int result = NF_ACCEPT;
 
+
     switch (origin) {
         case SNOOP_FROM_WH:
             if (pkt_info->rst || pkt_info->fin) {	// FIN or RST
@@ -898,7 +937,8 @@ static void setup_pkt_info(pkt_info_t * result, struct sk_buff *skb)
     memset(result, '\0', sizeof(pkt_info_t));
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
-    iph = ipip_hdr(skb);
+    /*iph = ipip_hdr(skb);*/
+    iph = ip_hdr(skb);
 #else
     iph = skb->nh.iph;
 #endif
@@ -914,6 +954,7 @@ static void setup_pkt_info(pkt_info_t * result, struct sk_buff *skb)
     result->size =
         ntohs(iph->tot_len) - (iph->ihl << 2) - (tcph->doff << 2);
     result->ack = tcph->ack;
+    result->psh = tcph->psh;
     result->rst = tcph->rst;
     result->syn = tcph->syn;
     result->fin = tcph->fin;
@@ -971,7 +1012,8 @@ static unsigned int snoop_nf_hook(
 
     enum sn_pkt_origin pkt_origin;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
-    struct iphdr *iph = ipip_hdr(pskb);
+    /*struct iphdr *iph = ipip_hdr(pskb);*/
+    struct iphdr *iph = ip_hdr(pskb);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
     struct iphdr *iph = ipip_hdr(*pskb);
 #else
@@ -982,6 +1024,7 @@ static unsigned int snoop_nf_hook(
     {
         return NF_ACCEPT;
     }
+
 
     if (strcmp(in->name, out->name) == 0)
         return NF_ACCEPT;
@@ -1110,7 +1153,7 @@ static int snoop_init(void)
     }
 
     printk("Berkley snoop version %s: %s\n", VERSION, AUTHOR);
-    DBG("sUP\n");
+    DBG("SUP\n");
 
 #if 0
     printk("Berkley snoop version %s (%u buckets, %d max)"
@@ -1203,9 +1246,9 @@ static void snoop_exit(void)
     printk("SNOOP: Input packets %lu, %lu retransmitted\n",
             snoop_stats.input_pkts, snoop_stats.sender_rxmits);
     printk
-        ("SNOOP: ACKs %lu total, %lu NEW, %lu DUP, %lu WUPD, %lu DROPPED\n",
+        ("SNOOP: ACKs %lu total, %lu NEW, %lu DUP, %lu WUPD, %lu DROPPED %lu dropped %lu reset\n",
          snoop_stats.acks, snoop_stats.newacks, snoop_stats.dupacks,
-         snoop_stats.win_updates, snoop_stats.dupacks_dropped);
+         snoop_stats.win_updates, snoop_stats.dupacks_dropped, snoop_stats.dropped_acks, snoop_stats.ack_resets);
     printk
         ("SNOOP: Local retransmissions %lu, retransmission timeouts %lu, cache misses %lu\n",
          snoop_stats.local_rxmits, snoop_stats.rto,
