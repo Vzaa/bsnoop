@@ -80,8 +80,8 @@ static int (*nf_forward) (struct sk_buff *);
 
 static inline int get_optlen(struct tcphdr * tcph);
 static inline unsigned char * get_opt_ptr(struct sk_buff * skb, int optlen);
-static inline void get_ts(unsigned char * ptr, u32 * ts_a, u32 * ts_b);
-static inline void set_ts(unsigned char * ptr, u32 ts_a, u32 ts_b);
+static int extract_ts_option(unsigned char * ptr, int length, u32 * ts_a, u32 * ts_b);
+static int update_ts_option(unsigned char * ptr, int length, u32 ts_a, u32 ts_b);
 
 static void sn_forward(sn_packet_t * pkt)
 {
@@ -370,7 +370,6 @@ inline static void restart_idle_timer(sn_conntrack_t * ct)
 
 static unsigned int snoop_data(pkt_info_t * pkt_info)
 {
-    int i;
     struct sk_buff * rep_ack = NULL;
     struct iphdr *iph;
     struct tcphdr *tcph, _tcph;
@@ -425,38 +424,16 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 tcph->seq = htonl(pkt_info->ack_seq);
                 tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
                 /*tcph->window = htonl(entry->last_window);*/
+/*#define TS_UPDATE_TEST*/
 #ifdef TS_UPDATE_TEST
-                /*scan optional parts for timestamp*/
                 u32 ts_a = 0, ts_b = 0;
+                int ts_field = 0;
                 if (pkt_info->opt != NULL) {
-                    for (i = 0; i < pkt_info->optlen; ++i) {
-                        switch (pkt_info->opt[i]) {
-                            case 1:
-                                break;
-                            case 8:
-                                get_ts(pkt_info->opt + i, &ts_a, &ts_b);
-                                DBG("ts 0x%x 0x%x\n", ts_a, ts_b);
-                                i+=pkt_info->opt[i + 1];
-                                break;
-                            default:
-                                printk(KERN_ERR "SNOOP: Unhandled opts field, don't know what to do\n");
-                        }
-                    }
+                    ts_field = extract_ts_option(pkt_info->opt, pkt_info->optlen, &ts_a, &ts_b);
                 }
                 unsigned char * opts = get_opt_ptr(rep_ack, get_optlen(tcph));
-                if (opts != NULL) {
-                    for (i = 0; i < get_optlen(tcph); ++i) {
-                        switch (opts[i]) {
-                            case 1:
-                                break;
-                            case 8:
-                                set_ts(opts + i, ts_b, ts_a);
-                                i+=opts[i + 1];
-                                break;
-                            default:
-                                printk(KERN_ERR "SNOOP: Unhandled opts field, don't know what to do\n");
-                        }
-                    }
+                if (opts != NULL && ts_field) {
+                    update_ts_option(opts, get_optlen(tcph), ts_b, ts_a);
                 }
 #endif
                 /* calculate updated checksum */
@@ -645,6 +622,78 @@ static int extract_sack_option(pkt_info_t * pkt_info, struct tcp_sack_block *sb)
         }
     }
 
+    return result;
+}
+
+static int extract_ts_option(unsigned char * ptr, int length, u32 * ts_a, u32 * ts_b)
+{
+    int result = 0;
+    if (!length)
+        return result;
+
+    while (length > 0) {
+        int opcode = *ptr++;
+        int opsize;
+
+        if (opcode == TCPOPT_EOL)
+            break;
+
+        switch (opcode) {
+            case TCPOPT_NOP:
+                length--;
+                continue;
+
+            case TCPOPT_TIMESTAMP:
+                opsize = *ptr++;
+                *ts_a = ntohl(*((u32*) (ptr)));
+                *ts_b = ntohl(*((u32*) (ptr + 4)));
+                result = 1;
+                break;
+
+            default:
+                opsize = *ptr++;
+                break;
+        }
+
+        length -= opsize;
+        ptr += opsize - 2;
+    }
+    return result;
+}
+
+static int update_ts_option(unsigned char * ptr, int length, u32 ts_a, u32 ts_b)
+{
+    int result = 0;
+    if (!length)
+        return result;
+
+    while (length > 0) {
+        int opcode = *ptr++;
+        int opsize;
+
+        if (opcode == TCPOPT_EOL)
+            break;
+
+        switch (opcode) {
+            case TCPOPT_NOP:
+                length--;
+                continue;
+
+            case TCPOPT_TIMESTAMP:
+                opsize = *ptr++;
+                *((u32*) (ptr)) = htonl(ts_a);
+                *((u32*) (ptr + 4)) = htonl(ts_b);
+                result = 1;
+                break;
+
+            default:
+                opsize = *ptr++;
+                break;
+        }
+
+        length -= opsize;
+        ptr += opsize - 2;
+    }
     return result;
 }
 
@@ -1014,18 +1063,6 @@ static void setup_pkt_info(pkt_info_t * result, struct sk_buff *skb)
 static inline int get_optlen(struct tcphdr * tcph)
 {
     return (tcph->doff << 2) - sizeof(struct tcphdr);
-}
-
-static inline void get_ts(unsigned char * ptr, u32 * ts_a, u32 * ts_b)
-{
-    *ts_a = ntohl(*((u32*) (ptr + 1)));
-    *ts_b = ntohl(*((u32*) (ptr + 5)));
-}
-
-static inline void set_ts(unsigned char * ptr, u32 ts_a, u32 ts_b)
-{
-    *((u32*) (ptr + 1)) = htonl(ts_a);
-    *((u32*) (ptr + 5)) = htonl(ts_b);
 }
 
 static inline unsigned char * get_opt_ptr(struct sk_buff * skb, int optlen)
