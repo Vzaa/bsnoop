@@ -423,8 +423,8 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
 
                 tcph->seq = htonl(pkt_info->ack_seq);
                 tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
-                /*tcph->window = htonl(entry->last_window);*/
-/*#define TS_UPDATE_TEST*/
+                tcph->window = htons(entry->last_window);
+#define TS_UPDATE_TEST
 #ifdef TS_UPDATE_TEST
                 u32 ts_a = 0, ts_b = 0;
                 int ts_field = 0;
@@ -451,7 +451,8 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                         pkt_info->dport,
                         pkt_info->sport
                    );
-                nf_forward(rep_ack);
+                int res;
+                res = nf_forward(rep_ack);
                 /*kfree_skb(rep_ack);*/
             }
         }
@@ -726,6 +727,7 @@ static unsigned int snoop_clean_packets(sn_conntrack_t * ct, u32 ack_seq)
 
 static unsigned int snoop_ack(pkt_info_t * pkt_info)
 {
+    int sack = 0;
     int alloc_first_ack = 0;
     u32 hash =
         snoop_hash(pkt_info->saddr, pkt_info->sport, pkt_info->daddr,
@@ -791,6 +793,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
         snoop_stats.dupacks++;
 
         if (sb_count) {
+            sack = 1;
             int i;
             DBG("SACK(");
 
