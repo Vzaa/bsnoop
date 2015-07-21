@@ -402,15 +402,20 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
         entry->isn = pkt_info->seq;
         DBG("WAIT_ACK");
     } else {
-        if (pkt_info->seq >= entry->last_ack)
+        int cong = 1;
+        /*printk("%u %u %u %u\n", pkt_info->seq, entry->last_ack_gen + pkt_info->size, entry->last_ack_gen, pkt_info->size);*/
+        if (pkt_info->seq == entry->last_ack_gen)
+        {
+            cong = 0;
             ct_insert_packet(entry, pkt_info);
+        }
         else {
             // FIXME: send ACK with last_ack to sender
             // although this is not very common path of execution
             // result = NF_DROP;
             DBG("OLD");
         }
-        if (entry->first_ack) {
+        if (entry->first_ack && !cong) {
             if (pkt_info->size > 0) {
                 rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
                 iph = ip_hdr(rep_ack);
@@ -421,6 +426,7 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 /*check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));*/
                 /*DBG("\n0x%x 0x%x %d 0x%x\n", check, old_check, rep_ack->len, rep_ack->csum);*/
 
+                entry->last_ack_gen = pkt_info->seq + pkt_info->size;
                 tcph->seq = htonl(pkt_info->ack_seq);
                 tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
                 tcph->window = htons(entry->last_window);
@@ -456,6 +462,35 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 /*kfree_skb(rep_ack);*/
             }
         }
+        else if (entry->first_ack && cong) {
+            rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
+            iph = ip_hdr(rep_ack);
+            tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
+            tcph->check = 0;
+            printk("congestion?\n");
+            printk("%u %u\n", pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn);
+            result = NF_DROP;
+
+            tcph->seq = htonl(pkt_info->ack_seq);
+            tcph->ack_seq = htonl(entry->last_ack_gen);
+            tcph->window = htons(entry->last_window);
+#ifdef TS_UPDATE_TEST
+            u32 ts_a = 0, ts_b = 0;
+            int ts_field = 0;
+            if (pkt_info->opt != NULL) {
+                ts_field = extract_ts_option(pkt_info->opt, pkt_info->optlen, &ts_a, &ts_b);
+            }
+            unsigned char * opts = get_opt_ptr(rep_ack, get_optlen(tcph));
+            if (opts != NULL && ts_field) {
+                update_ts_option(opts, get_optlen(tcph), ts_b, ts_a);
+            }
+#endif
+            /* calculate updated checksum */
+            tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
+            int res;
+            res = nf_forward(rep_ack);
+            /*kfree_skb(rep_ack);*/
+        }
     }
 
     DBG_SEQ_ACK(entry);
@@ -473,7 +508,7 @@ static void conntrack_create(pkt_info_t * pkt_info)
         snoop_hash(pkt_info->saddr, pkt_info->sport, pkt_info->daddr,
                 pkt_info->dport);
     sn_conntrack_t *entry;
-    DBG("TRACK TCP, SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
+    printk("TRACK TCP, SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
             ((unsigned char*)&(pkt_info->saddr))[3],
             ((unsigned char*)&(pkt_info->saddr))[2],
             ((unsigned char*)&(pkt_info->saddr))[1],
@@ -757,6 +792,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
     if (entry->state == SNOOP_WAITACK) {
         entry->state = SNOOP_ESTABLISHED;
         entry->last_ack = pkt_info->ack_seq;
+        entry->last_ack_gen = pkt_info->ack_seq;
         if (entry->first_ack != NULL) {
             kfree_skb(entry->first_ack);
         }

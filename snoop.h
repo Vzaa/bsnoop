@@ -24,7 +24,7 @@
 #define SNOOP_DEFAULT_RTT	50		/* initial RTT - msecs */
 #define SNOOP_MIN_RTT		10		/* minimum RTT - msecs */
 #define SNOOP_MAX_RTT		600		/* maximum RTT - msecs */
-#define SNOOP_CACHE_MAX		40		/* max packets to cache per connection */
+#define SNOOP_CACHE_MAX		128		/* max packets to cache per connection */
 
 struct sn_conntrack_s;
 typedef struct sn_packet_s {
@@ -88,6 +88,7 @@ typedef struct sn_conntrack_s {
 	u16			fport;		/* FH TCP port */
 	u32			last_seq;	/* last byte of last packet buffered */
 	u32			last_ack;	/* last byte recvd by WH */
+	u32			last_ack_gen;	/* last byte recvd by WH */
 	u32			last_window;	/* last window size */
 	u32			isn;		/* initial sequence number (ISN) */
 	u32			risn;		/* receiver ISN */
