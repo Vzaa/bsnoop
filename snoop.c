@@ -312,7 +312,7 @@ static void ct_insert_packet(sn_conntrack_t * ct, pkt_info_t * pkt_info)
         return;
 
     snoop_stats.input_pkts++;
-    if (ct->last_seq < pkt_info->seq) {	/* new segment */
+    if (before(ct->last_seq,  pkt_info->seq)) {	/* new segment */
         if (ct->pkt_count >= SNOOP_CACHE_MAX) {
             // Remove oldest packet
             sn_packet_t *pkt = conntrack_head_packet(ct);
@@ -350,7 +350,7 @@ static void ct_insert_packet(sn_conntrack_t * ct, pkt_info_t * pkt_info)
                 break;
             }
 
-            if (cur->seq > pkt_info->seq) {
+            if (after(cur->seq, pkt_info->seq)) {
                 pkt = ct_enqueue_packet(ct, &cur->list, pkt_info);
                 DBG("SNDR.RXMIT %ib (%i)", pkt_info->size, ct->pkt_count);
                 break;
@@ -650,7 +650,7 @@ static int extract_sack_option(pkt_info_t * pkt_info, struct tcp_sack_block *sb)
     /* sort */
     for (j = 0; j < result - 1; j++) {
         for (i = j + 1; i < result; i++) {
-            if (sb[i].start_seq < sb[j].start_seq) {
+            if (before(sb[i].start_seq, sb[j].start_seq)) {
                 struct tcp_sack_block tmp = sb[i];
                 sb[i] = sb[j];
                 sb[j] = tmp;
@@ -741,7 +741,7 @@ static unsigned int snoop_clean_packets(sn_conntrack_t * ct, u32 ack_seq)
     sn_packet_t *cur, *next;
 
     list_for_each_entry_safe(cur, next, &ct->pkt_list, list) {
-        if (ack_seq <= cur->seq)
+        if (ack_seq == cur->seq || before(ack_seq, cur->seq))
             break;
 
         list_del(&cur->list);
@@ -804,9 +804,9 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
         snoop_stats.ack_resets++;
         alloc_first_ack = 1;
         DBG("ESTABLISHED");
-    } else if (pkt_info->ack_seq < entry->last_ack) {	// Spurious ACK
+    } else if (before(pkt_info->ack_seq, entry->last_ack)) {	// Spurious ACK
         DBG("SPU");
-    } else if (entry->last_ack < pkt_info->ack_seq) {	// new ACK
+    } else if (before(entry->last_ack, pkt_info->ack_seq)) {	// new ACK
         unsigned long pkt_send_time = 0;
 
         DBG("NEW");
@@ -874,14 +874,14 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
                 int rxmit = 0;
                 int i;
 
-                if (cur->seq < pkt_info->ack_seq)
+                if (before(cur->seq, pkt_info->ack_seq))
                     continue;
 
                 left_edge = pkt_info->ack_seq;
 
                 for (i = 0; i < sb_count; i++) {
-                    if (left_edge <= cur->seq
-                            && cur->seq + cur->size < sb[i].start_seq) {
+                    if ((left_edge == cur->seq || before(left_edge, cur->seq))
+                            && before(cur->seq + cur->size, sb[i].start_seq)) {
                         rxmit = 1;
                         lost_length -= cur->size;
                         break;
@@ -910,7 +910,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
         }
 
         cur = list_entry(entry->pkt_list.next, sn_packet_t, list);
-        if (cur->seq > pkt_info->ack_seq) {	/* nothing: forward as is */
+        if (after(cur->seq, pkt_info->ack_seq)) {	/* nothing: forward as is */
             DBG(" HB");
             entry->dack_count++;
             snoop_stats.cache_misses++;
