@@ -19,12 +19,12 @@
 
 #define VERSION         	"0.3-rc7"
 
-#define SNOOP_RXMIT_MAX		8		/* max rxmit count */
+#define SNOOP_RXMIT_MAX		16		/* max rxmit count */
 #define SNOOP_CONN_TIMEO	60		/* seconds before connection is stale */
 #define SNOOP_DEFAULT_RTT	50		/* initial RTT - msecs */
 #define SNOOP_MIN_RTT		10		/* minimum RTT - msecs */
 #define SNOOP_MAX_RTT		600		/* maximum RTT - msecs */
-#define SNOOP_CACHE_MAX		128		/* max packets to cache per connection */
+#define SNOOP_CACHE_MAX		2048		/* max packets to cache per connection */
 
 struct sn_conntrack_s;
 typedef struct sn_packet_s {

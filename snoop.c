@@ -1,12 +1,12 @@
 /* snoop.c - Berkley snoop protocol module
- *	
- * (C) 2005-2006 Ivan Keberlein <ikeberlein@users.sourceforge.net> 
+ *
+ * (C) 2005-2006 Ivan Keberlein <ikeberlein@users.sourceforge.net>
  * 		 KNET Ltd. http://www.isp.kz
- *	
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public Licence version 2 as
  * published by Free Software Foundation.
- * 
+ *
  * See COPYING for details
  *
  */
@@ -34,6 +34,12 @@
 #define DBG(args...)	printk(args)
 #else
 #define DBG(args...)
+#endif
+
+#if 0
+#define INFO(args...)	printk(args)
+#else
+#define INFO(args...)
 #endif
 
 #define DBG_SEQ_ACK(X)	DBG(" SA<%lu,%lu>", \
@@ -403,11 +409,18 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
         DBG("WAIT_ACK");
     } else {
         int cong = 1;
+        int ahead = 0;
+        result = NF_DROP;
         /*printk("%u %u %u %u\n", pkt_info->seq, entry->last_ack_gen + pkt_info->size, entry->last_ack_gen, pkt_info->size);*/
         if (pkt_info->seq == entry->last_ack_gen)
         {
+            result = NF_ACCEPT;
             cong = 0;
             ct_insert_packet(entry, pkt_info);
+            if (entry->last_ack_gen - entry->last_ack > 2000000) {
+                result = NF_DROP;
+                ahead = 1;
+            }
         }
         else {
             // FIXME: send ACK with last_ack to sender
@@ -415,7 +428,7 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             // result = NF_DROP;
             DBG("OLD");
         }
-        if (entry->first_ack && !cong) {
+        if (entry->first_ack && !cong && !ahead) {
             if (pkt_info->size > 0) {
                 rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
                 iph = ip_hdr(rep_ack);
@@ -444,7 +457,7 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
 #endif
                 /* calculate updated checksum */
                 tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
-                DBG("SNOOP: reply with rel ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->first_seq + 1);
+                INFO("reply with rel ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->isn + 1);
                 DBG("ACK INSERT SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
                         ((unsigned char*)&(iph->saddr))[0],
                         ((unsigned char*)&(iph->saddr))[1],
@@ -462,13 +475,12 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 /*kfree_skb(rep_ack);*/
             }
         }
-        else if (entry->first_ack && cong) {
+        else if (entry->first_ack && (cong || ahead)) {
             rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
             iph = ip_hdr(rep_ack);
             tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
             tcph->check = 0;
-            printk("congestion?\n");
-            printk("%u %u\n", pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn);
+            INFO("congestion? %u %u %u %d %d\n", entry->last_ack - entry->isn, pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn, entry->pkt_count, ahead);
             result = NF_DROP;
 
             tcph->seq = htonl(pkt_info->ack_seq);
@@ -487,6 +499,7 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
 #endif
             /* calculate updated checksum */
             tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
+            INFO("reply dup ack with rel ack_seq:%u\n", (entry->last_ack_gen) - entry->isn + 1);
             int res;
             res = nf_forward(rep_ack);
             /*kfree_skb(rep_ack);*/
@@ -762,7 +775,7 @@ static unsigned int snoop_clean_packets(sn_conntrack_t * ct, u32 ack_seq)
 
 static unsigned int snoop_ack(pkt_info_t * pkt_info)
 {
-    int sack = 0;
+    int found = 0;
     int alloc_first_ack = 0;
     u32 hash =
         snoop_hash(pkt_info->saddr, pkt_info->sport, pkt_info->daddr,
@@ -825,11 +838,11 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
         struct tcp_sack_block sb[4];
         int sb_count = extract_sack_option(pkt_info, sb);
         sn_packet_t *cur;
+        INFO("dup ack %u\n", pkt_info->ack_seq - entry->isn);
 
         snoop_stats.dupacks++;
 
         if (sb_count) {
-            sack = 1;
             int i;
             DBG("SACK(");
 
@@ -849,6 +862,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
 #endif
         DBG("DUP(%i)", entry->dack_count);
 
+        INFO("%d in pkt list\n", entry->pkt_count);
         if (list_empty(&entry->pkt_list)) {
             DBG(" LE");
             entry->dack_count++;
@@ -861,6 +875,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
             int lost_length = 0;
             u32 left_edge = pkt_info->ack_seq;
             int i;
+            printk(KERN_ERR "SACK is NOT SUPPORTED!!!\n");
 
             for (i = 0; i < sb_count; i++) {
                 if (sb[i].end_seq < pkt_info->ack_seq)
@@ -909,6 +924,56 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
             }
         }
 
+
+        if (entry->last_window != pkt_info->window || pkt_info->size > 0) {
+            DBG(" WUP");
+            snoop_stats.win_updates++;
+            goto out;
+        }
+
+        int retx_cnt = 0;
+
+        list_for_each_entry(cur, &entry->pkt_list, list) {
+            int rxmit = 0;
+            int rxmit_prev = 0;
+            int i;
+
+            if (before(cur->seq, pkt_info->ack_seq))
+                continue;
+
+            if ((pkt_info->ack_seq == cur->seq )) {
+                rxmit = 1;
+                found = 1;
+            }
+
+            if (after(cur->seq, pkt_info->ack_seq)) {
+                rxmit = 1;
+                retx_cnt++;
+            }
+
+            if (retx_cnt > 3) {
+                break;
+            }
+
+            if ((jiffies - cur->send_time) < 2 * entry->rtt)
+                continue;
+
+            if (found && rxmit) {
+                INFO("retransmit %u\n", cur->seq - entry->isn);
+                sn_retransmit(cur);
+                continue;
+            }
+
+            if (cur->sender_rxmit) {
+                INFO("sender retransmit %u\n", cur->seq - entry->isn);
+                sn_retransmit(cur);
+            }
+        }
+
+        if (found == 0) {
+            INFO("%u not found in cache\n", pkt_info->ack_seq - entry->isn);
+        }
+
         cur = list_entry(entry->pkt_list.next, sn_packet_t, list);
         if (after(cur->seq, pkt_info->ack_seq)) {	/* nothing: forward as is */
             DBG(" HB");
@@ -917,30 +982,19 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
             goto out;
         }
 
-        if (cur->seq != pkt_info->ack_seq) {	/* pass ack to sender */
-            DBG("!!MS!!");
-            snoop_stats.cache_misses++;
-            goto out;
-        }
+        /*if (cur->seq != pkt_info->ack_seq) {	[> pass ack to sender <]*/
+            /*DBG("!!MS!!");*/
+            /*snoop_stats.cache_misses++;*/
+            /*goto out;*/
+        /*}*/
 
-        if (cur->sender_rxmit) {	/* nothing: forward as is */
-            DBG(" SR");
-            sn_retransmit(cur);
-            entry->dack_count++;
-            goto out;
-        }
 
-        if ((jiffies - cur->send_time) > 2 * entry->rtt) {
-            DBG(" RXMIT(%lu)", jiffies - cur->send_time);
-            sn_retransmit(cur);
-        }
+        /*if ((jiffies - cur->send_time) > 2 * entry->rtt) {*/
+            /*DBG(" RXMIT(%lu)", jiffies - cur->send_time);*/
+            /*sn_retransmit(cur);*/
+        /*}*/
         entry->dack_count++;
 
-        if (entry->last_window != pkt_info->window || pkt_info->size > 0) {
-            DBG(" WUP");
-            snoop_stats.win_updates++;
-            goto out;
-        }
         snoop_stats.dupacks_dropped++;
         result = NF_DROP;
     }
@@ -1118,7 +1172,7 @@ static inline unsigned char * get_opt_ptr(struct sk_buff * skb, int optlen)
         return tmp;
     }
 }
-    
+
 
 static inline int is_fx_dev(const char *dev)
 {
