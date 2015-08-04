@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/list.h>
+#include <linux/list_sort.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/ip.h>
@@ -374,6 +375,41 @@ inline static void restart_idle_timer(sn_conntrack_t * ct)
     mod_timer(&ct->tmo_timer, jiffies + SNOOP_CONN_TIMEO * HZ);
 }
 
+static u32 find_next_ack_seq(u32 last_ack, sn_conntrack_t * entry)
+{
+    sn_packet_t *cur;
+    u32 next_ack = last_ack;
+
+    list_for_each_entry(cur, &entry->pkt_list, list) {
+        if (before(cur->seq, last_ack))
+            continue;
+
+        if (next_ack != cur->seq) {
+            return next_ack;
+        }
+        next_ack = cur->seq + cur->size;
+    }
+    return next_ack;
+}
+
+
+static int cmp_packets(void *priv, struct list_head *a, struct list_head *b)
+{
+        sn_packet_t * pkt_a;
+        sn_packet_t * pkt_b;
+
+        pkt_a = list_entry(a, sn_packet_t, list);
+        pkt_b = list_entry(b, sn_packet_t, list);
+
+        if (before(pkt_a->seq, pkt_a->seq))
+                return -1;
+
+        if (after(pkt_a->seq, pkt_a->seq))
+                return 1;
+
+        return 0;
+}
+
 static unsigned int snoop_data(pkt_info_t * pkt_info)
 {
     struct sk_buff * rep_ack = NULL;
@@ -410,13 +446,17 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
     } else {
         int cong = 1;
         int ahead = 0;
-        result = NF_DROP;
+        result = NF_ACCEPT;
         /*printk("%u %u %u %u\n", pkt_info->seq, entry->last_ack_gen + pkt_info->size, entry->last_ack_gen, pkt_info->size);*/
+        if (pkt_info->seq >= entry->last_ack_gen)
+        {
+            ct_insert_packet(entry, pkt_info);
+            list_sort(NULL, &entry->pkt_list, &cmp_packets);
+        }
+
         if (pkt_info->seq == entry->last_ack_gen)
         {
-            result = NF_ACCEPT;
             cong = 0;
-            ct_insert_packet(entry, pkt_info);
             /*if (entry->last_ack_gen - entry->last_ack > 2000000) {*/
             if (entry->pkt_count >= SNOOP_CACHE_MAX - 10) {
                 result = NF_DROP;
@@ -440,9 +480,11 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 /*check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));*/
                 /*DBG("\n0x%x 0x%x %d 0x%x\n", check, old_check, rep_ack->len, rep_ack->csum);*/
 
-                entry->last_ack_gen = pkt_info->seq + pkt_info->size;
                 tcph->seq = htonl(pkt_info->ack_seq);
-                tcph->ack_seq = htonl(pkt_info->seq + pkt_info->size);
+                entry->last_ack_gen = find_next_ack_seq(pkt_info->seq + pkt_info->size, entry);
+                /*entry->last_ack_gen = pkt_info->seq + pkt_info->size;*/
+                tcph->ack_seq = htonl(entry->last_ack_gen);
+
                 tcph->window = htons(entry->last_window);
 #define TS_UPDATE_TEST
 #ifdef TS_UPDATE_TEST
