@@ -36,7 +36,7 @@
 #define DBG(args...)
 #endif
 
-#if 0
+#if 1
 #define INFO(args...)	printk(args)
 #else
 #define INFO(args...)
@@ -417,7 +417,8 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             result = NF_ACCEPT;
             cong = 0;
             ct_insert_packet(entry, pkt_info);
-            if (entry->last_ack_gen - entry->last_ack > 2000000) {
+            /*if (entry->last_ack_gen - entry->last_ack > 2000000) {*/
+            if (entry->pkt_count >= SNOOP_CACHE_MAX - 10) {
                 result = NF_DROP;
                 ahead = 1;
             }
@@ -457,7 +458,6 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
 #endif
                 /* calculate updated checksum */
                 tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
-                INFO("reply with rel ack_seq:%u\n", (pkt_info->seq + pkt_info->size) - entry->isn + 1);
                 DBG("ACK INSERT SRC:%d.%d.%d.%d. DST:%d.%d.%d.%d sport:%d dport:%d\n",
                         ((unsigned char*)&(iph->saddr))[0],
                         ((unsigned char*)&(iph->saddr))[1],
@@ -472,6 +472,7 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                    );
                 int res;
                 res = nf_forward(rep_ack);
+                INFO("%d: reply with rel ack_seq:%u\n", res, (pkt_info->seq + pkt_info->size) - entry->isn);
                 /*kfree_skb(rep_ack);*/
             }
         }
@@ -480,7 +481,13 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             iph = ip_hdr(rep_ack);
             tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
             tcph->check = 0;
-            INFO("congestion? %u %u %u %d %d\n", entry->last_ack - entry->isn, pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn, entry->pkt_count, ahead);
+            if (cong) {
+                /*INFO("congestion? %u %u %u %d %d\n", entry->last_ack - entry->isn, pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn, entry->pkt_count, ahead);*/
+                INFO("congestion? %u difference\n", pkt_info->seq - entry->last_ack_gen);
+            }
+            else if (ahead) {
+                INFO("ahead? %u %u %u %d %d\n", entry->last_ack - entry->isn, pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn, entry->pkt_count, ahead);
+            }
             result = NF_DROP;
 
             tcph->seq = htonl(pkt_info->ack_seq);
@@ -499,9 +506,9 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
 #endif
             /* calculate updated checksum */
             tcph->check = tcp_v4_check(rep_ack->len - (iph->ihl << 2), iph->saddr, iph->daddr, csum_partial(tcph, tcph->doff << 2, rep_ack->csum));
-            INFO("reply dup ack with rel ack_seq:%u\n", (entry->last_ack_gen) - entry->isn + 1);
             int res;
             res = nf_forward(rep_ack);
+            INFO("%d reply dup ack with rel ack_seq:%u\n", res,  (entry->last_ack_gen) - entry->isn);
             /*kfree_skb(rep_ack);*/
         }
     }
@@ -1003,6 +1010,9 @@ out:
         result = NF_DROP;
         snoop_stats.dropped_acks++;
     }
+    else {
+        INFO("ack not dropped\n");
+    }
     entry->last_window = pkt_info->window;
     DBG_SEQ_ACK(entry);
     spin_unlock(&entry->lock);
@@ -1138,6 +1148,10 @@ static void setup_pkt_info(pkt_info_t * result, struct sk_buff *skb)
     result->rst = tcph->rst;
     result->syn = tcph->syn;
     result->fin = tcph->fin;
+
+    if (result->size > 1460) {
+        printk("too large! %d\n", result->size);
+    }
 
     result->optlen = (tcph->doff << 2) - sizeof(_tcph);
     if (result->optlen) {
