@@ -470,19 +470,20 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
         int ahead = 0;
         result = NF_ACCEPT;
         /*printk("%u %u %u %u\n", pkt_info->seq, entry->last_ack_gen + pkt_info->size, entry->last_ack_gen, pkt_info->size);*/
-        if (pkt_info->seq >= entry->last_ack_gen)
+        if (pkt_info->seq >= entry->last_ack_gen && !(entry->pkt_count >= SNOOP_CACHE_MAX - 10))
         {
             ct_insert_packet(entry, pkt_info);
+        }
+        else
+        {
+            result = NF_DROP;
+            ahead = 1;
         }
 
         if (pkt_info->seq == entry->last_ack_gen)
         {
             cong = 0;
             /*if (entry->last_ack_gen - entry->last_ack > 2000000) {*/
-            if (entry->pkt_count >= SNOOP_CACHE_MAX - 10) {
-                result = NF_DROP;
-                ahead = 1;
-            }
         }
         else {
             // FIXME: send ACK with last_ack to sender
@@ -539,7 +540,10 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
                 /*kfree_skb(rep_ack);*/
             }
         }
-        else if (entry->first_ack && (cong || ahead)) {
+        else if (entry->first_ack && (ahead)) {
+            result = NF_DROP;
+        }
+        else if (entry->first_ack && (cong)) {
             rep_ack = skb_copy(entry->first_ack, GFP_ATOMIC);
             iph = ip_hdr(rep_ack);
             tcph = skb_header_pointer(rep_ack, iph->ihl << 2, sizeof(_tcph), &_tcph);
@@ -551,7 +555,6 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
             else if (ahead) {
                 INFO("ahead? %u %u %u %d %d\n", entry->last_ack - entry->isn, pkt_info->seq - entry->isn, entry->last_ack_gen - entry->isn, entry->pkt_count, ahead);
             }
-            result = NF_DROP;
 
             tcph->seq = htonl(pkt_info->ack_seq);
             tcph->ack_seq = htonl(entry->last_ack_gen);
@@ -678,6 +681,7 @@ static void rtt_calc(sn_conntrack_t * ct, unsigned long pkt_send_time)
     ct->rtt = (80 * ct->rtt + 20 * diff) / 100;
     if (ct->rtt < msecs_to_jiffies(SNOOP_MIN_RTT))
         ct->rtt = msecs_to_jiffies(SNOOP_MIN_RTT);
+    /*ct->rtt = msecs_to_jiffies(SNOOP_MIN_RTT);*/
 
     DBG(" RTT<%lu/%lu>", ct->rtt, diff);
 }
@@ -1031,6 +1035,7 @@ static unsigned int snoop_ack(pkt_info_t * pkt_info)
             if (found && rxmit) {
                 INFO("retransmit %u\n", cur->seq - entry->isn);
                 sn_retransmit(cur);
+                break;
                 continue;
             }
 
