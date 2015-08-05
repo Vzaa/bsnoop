@@ -37,7 +37,7 @@
 #define DBG(args...)
 #endif
 
-#if 1
+#if 0
 #define INFO(args...)	printk(args)
 #else
 #define INFO(args...)
@@ -301,11 +301,33 @@ static inline sn_packet_t *ct_enqueue_packet(sn_conntrack_t * ct,
         struct list_head *head,
         pkt_info_t * pkt_info)
 {
+    sn_packet_t *cur;
     sn_packet_t *pkt = pkt_create(ct, pkt_info);
 
     if (pkt == NULL)
         return NULL;
-    list_add_tail(&pkt->list, head);
+
+    if (ct->pkt_count >= SNOOP_CACHE_MAX) {
+        return NULL;
+    }
+
+    if (ct->pkt_count == 0) {
+        list_add_tail(&pkt->list, head);
+    }
+    else
+    {
+        int added = 0;
+        list_for_each_entry_reverse(cur, head, list) {
+            if (after(pkt->seq, cur->seq)) {
+                list_add(&pkt->list, &cur->list);
+                added = 1;
+                break;
+            }
+        }
+        if (!added) {
+            list_add_tail(&pkt->list, head);
+        }
+    }
     ct->pkt_count++;
 
     return pkt;
@@ -451,7 +473,6 @@ static unsigned int snoop_data(pkt_info_t * pkt_info)
         if (pkt_info->seq >= entry->last_ack_gen)
         {
             ct_insert_packet(entry, pkt_info);
-            list_sort(NULL, &entry->pkt_list, &cmp_packets);
         }
 
         if (pkt_info->seq == entry->last_ack_gen)
